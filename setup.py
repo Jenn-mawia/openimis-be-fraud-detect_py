@@ -15,8 +15,8 @@ setup(
     description="AI-powered claims fraud detection module for openIMIS (Rules Engine + Isolation Forest).",
     long_description=README,
     url="https://openimis.org/",
-    author="openIMIS Hackathon Team",
-    author_email="hackathon@openimis.org",
+    author="Lewis Munyi",
+    author_email="lewis.ndwiga@strathmore.edu",
     install_requires=[
         "django",
         "djangorestframework",
