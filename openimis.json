@@ -1,0 +1,9 @@
+{
+    "modules": [
+        {
+            "name": "fraud_detect",
+            "pip": "openimis-be-fraud-detect",
+            "url": "fraud_detect.urls"
+        }
+    ]
+}

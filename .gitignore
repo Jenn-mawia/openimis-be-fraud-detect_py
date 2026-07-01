@@ -1,0 +1,30 @@
+# Raw claim data — NEVER commit
+claims_raw.csv
+*.csv.bak
+
+# Trained model artefacts are checked in only after Phase 3 is complete
+# models/fraud_model.joblib
+# models/fraud_scaler.joblib
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter notebooks (data exploration only — not part of the module)
+*.ipynb
+.ipynb_checkpoints/
+
+# Plots generated during training
+plots/
+
+# Environment
+.env
+.venv/
+env/

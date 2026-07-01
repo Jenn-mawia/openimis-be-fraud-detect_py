@@ -1,0 +1,370 @@
+# openIMIS Fraud Detection Module
+
+AI-powered claims anomaly detector for openIMIS — Rules Engine + Isolation Forest.
+
+---
+
+## Problem Statement
+
+Health insurance fraud is a systemic problem in Kenya and across low- and
+middle-income countries. When a patient visits a hospital, the hospital submits
+a claim to the insurer describing what services were provided and how much they
+cost. The insurer then reviews the claim and decides how much to pay. This
+process is almost entirely manual — a human reviewer reads each claim and makes
+a judgement call.
+
+This creates two serious problems:
+
+**1. It is slow.** With hundreds or thousands of claims arriving daily,
+reviewers cannot keep up. Claims sit in queues for days or weeks before being
+processed.
+
+**2. It misses fraud.** Patterns visible in real Kenyan insurer data include:
+claims filed 6–8 months after the service date; invoices settled at a fraction
+of the billed amount; and repeated use of vague ICD codes such as `Z51.9`
+("medical care, unspecified") that provide no clinical justification for
+high-value services. A reviewer looking at one claim in isolation cannot easily
+detect that the same hospital has been systematically overbilling for months.
+
+The openIMIS platform, used by 38.8 million beneficiaries across 14 countries,
+currently has no automated fraud detection layer. Every claim must be manually
+adjudicated.
+
+---
+
+## Solution Overview
+
+A two-layer detection system integrated natively into openIMIS:
+
+**Layer 1 — Rules Engine** (`rules.py`): Deterministic, auditable rules derived
+directly from known fraud patterns in the dataset. Any claim that violates a
+rule is immediately flagged with a plain-language explanation. This catches the
+obvious cases at zero computational cost and is explainable to any reviewer.
+
+**Layer 2 — Isolation Forest** (`engine.py`): An unsupervised ML model trained
+on anonymised Kenyan insurer claim data. It scores every claim for statistical
+anomaly, catching fraud patterns that no one thought to write a rule for — the
+subtle, evolving schemes that slip past the rulebook.
+
+Both layers run automatically every time a claim is saved in openIMIS via a
+Django `post_save` signal. Results are stored in `tbl_FraudFlag` and exposed
+via REST and GraphQL APIs. A claims reviewer sees a colour-coded risk badge
+(LOW / MEDIUM / HIGH) on each claim. High-risk claims are prioritised for
+human review; low-risk claims are processed faster.
+
+When a reviewer overrides a decision, that override is logged and feeds back
+into the next model retraining cycle, making the system progressively smarter.
+
+---
+
+## Architecture
+
+```
+Claim saved (Django post_save signal)
+          │
+          ▼
+  ┌───────────────┐     ┌────────────────────┐
+  │  Rules Engine │     │  Isolation Forest  │
+  │  rules.py     │     │  engine.py         │
+  └───────┬───────┘     └────────┬───────────┘
+          │  fired_rules          │  anomaly_score
+          └────────────┬──────────┘
+                       ▼
+             compute_risk_level()
+             ┌─────────────────────────────┐
+             │ 2+ rules fired       → HIGH │
+             │ rules AND ML anomaly → HIGH │
+             │ rules XOR ML anomaly → MED  │
+             │ ML near-miss (<-0.1) → MED  │
+             │ nothing flagged      → LOW  │
+             └─────────────────────────────┘
+                       │
+                       ▼
+              tbl_FraudFlag (DB)
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+      REST API      GraphQL    FHIR Extension
+  /api/fraud_detect/ schema.py  fhir_extensions.py
+```
+
+---
+
+## Features Used by the Model
+
+| Feature | Description | Fraud Signal |
+|---------|-------------|--------------|
+| `invoice_inflation_ratio` | Invoice ÷ settled amount (capped at 10×) | Overbilling |
+| `claim_lag_days` | Days between service date and claim submission | Backdating |
+| `icd_is_vague` | 1 if ICD code is a known catch-all (e.g. Z51.9) | Diagnosis disguise |
+| `provider_avg_inflation` | Average inflation ratio across all provider claims | Provider-level pattern |
+| `provider_claim_count` | Total claims submitted by this provider | Volume anomaly |
+| `member_claim_count` | Total claims for this member | Ghost beneficiary signal |
+| `amount_vs_benchmark` | Invoice ÷ median invoice for this benefit code | Benchmark deviation |
+
+---
+
+## Installation
+
+### 1. Register the module
+
+Add to `openimis-be_py/openimis.json` (at the end of the `"modules"` array):
+
+```json
+{ "name": "fraud_detect", "pip": "openimis-be-fraud-detect", "url": "fraud_detect.urls" }
+```
+
+### 2. Start the backend with the Docker Compose overlay
+
+```bash
+# From openimis-dist_dkr/
+docker compose -f compose.yml -f compose.fraud-detect.yml up -d --no-deps backend worker
+```
+
+> **Startup time**: The first start on a fresh container installs `scikit-learn`,
+> `joblib`, `pandas`, and `numpy` (~2–3 min). Subsequent restarts of the same
+> container detect the packages are already present and skip the heavy install
+> (~5–10 seconds).
+
+### 3. Run migrations
+
+```bash
+docker compose -f compose.yml -f compose.fraud-detect.yml exec backend \
+  python manage.py migrate fraud_detect
+```
+
+This creates three tables:
+- `tbl_FraudFlag` — one fraud assessment row per scored claim
+- `tbl_ReviewerOverride` — human reviewer decisions (feeds retraining)
+- `tbl_FraudModelVersion` — tracks which `.joblib` artefact is active
+
+### 4. Train the ML model
+
+Place the feature CSV at `data/claims_features.csv` (must contain the 7 feature
+columns listed above, plus an optional `proxy_fraud_label` column which is
+ignored at inference time):
+
+```bash
+docker compose -f compose.yml -f compose.fraud-detect.yml exec backend \
+  python manage.py retrain_fraud_model
+```
+
+The command saves `models/fraud_model.joblib` and `models/fraud_scaler.joblib`
+to the host filesystem via the bind mount, so they survive container restarts.
+After training, restart the backend to load the new artefacts:
+
+```bash
+docker compose -f compose.yml -f compose.fraud-detect.yml restart backend
+until curl -sf http://localhost/api/fraud_detect/flags/ | grep -q count; do sleep 3; done
+```
+
+Retraining options:
+```bash
+python manage.py retrain_fraud_model --contamination 0.05 --n-estimators 300
+python manage.py retrain_fraud_model --dry-run   # fit but do not save
+```
+
+### 5. Seed demo claims (optional)
+
+```bash
+docker compose -f compose.yml -f compose.fraud-detect.yml exec backend \
+  python manage.py seed_demo_claims
+```
+
+Creates four synthetic claims (DEMO-A through DEMO-D) covering LOW, MEDIUM,
+and HIGH risk scenarios. Each claim is auto-scored by the `post_save` signal
+as soon as it is created.
+
+> **ICD code note**: The seed command looks up Z51.9, J06.9, and H52.1 in the
+> database. If those codes are absent (common in fresh installs), all claims
+> fall back to the first available diagnosis. DEMO-B still reaches HIGH via
+> 2 rules (lag + inflation); DEMO-C via ML anomaly detection.
+
+---
+
+## API Reference
+
+All endpoints are mounted at `/api/fraud_detect/` by openIMIS's URL router
+(`openimisurls.py` prefixes every module with `/api/<module_name>/`).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/fraud_detect/flags/` | List all fraud flags. Filter: `?risk_level=HIGH\|MEDIUM\|LOW` |
+| GET | `/api/fraud_detect/flags/{claim_id}/` | Get the flag for a specific claim |
+| POST | `/api/fraud_detect/override/` | Submit a reviewer override decision |
+| POST | `/api/fraud_detect/score/` | Score a raw claim dict on demand (no DB write) |
+
+### Example: on-demand score
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/score/ -H "Content-Type: application/json" -d '{"claimed_amount": 50000, "approved_amount": 1500, "icd_code": "Z51.9", "date_from": "2025-09-01", "date_claimed": "2026-07-01", "provider_avg_inflation": 3.5, "provider_claim_count": 80, "member_claim_count": 1, "amount_vs_benchmark": 8.0}' | python3 -m json.tool
+```
+
+Response:
+```json
+{
+  "rules": {
+    "is_flagged": true,
+    "fired_rules": [
+      {"name": "Invoice inflation above 3x", "description": "..."},
+      {"name": "Vague ICD code used", "description": "..."},
+      {"name": "High-value claim with vague diagnosis", "description": "..."}
+    ]
+  },
+  "ml": { "anomaly_score": -0.305, "is_anomaly": true },
+  "overall_risk_level": "HIGH"
+}
+```
+
+> **Shell tip**: Write curl commands as a single line. A bare backslash-newline
+> continuation in zsh can silently split the command, causing `command not found: -H`.
+
+### Example: list HIGH-risk flags
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/?risk_level=HIGH" | python3 -m json.tool
+```
+
+---
+
+## GraphQL
+
+```graphql
+query {
+  fraudFlags(riskLevel: "HIGH", first: 20) {
+    claimId
+    overallRiskLevel
+    anomalyScore
+    ruleFlagReasons
+  }
+}
+```
+
+---
+
+## Model Performance Report
+
+Evaluated on a held-out test set of **84,477 claims** (20% stratified split,
+`random_state=42`). The proxy fraud label is `1` when
+`SETTLED AMOUNT < 80% of INVOICE AMOUNT` — claims where the insurer already
+detected something wrong and partially rejected the claim.
+
+| Class | Precision | Recall | F1-score | Support |
+|-------|-----------|--------|----------|---------|
+| Normal | 0.91 | 0.94 | 0.92 | 75,595 |
+| Suspicious | 0.30 | 0.23 | 0.26 | 8,882 |
+| **Weighted avg** | **0.85** | **0.86** | **0.85** | **84,477** |
+
+**Overall accuracy**: 86% &nbsp;|&nbsp; **ROC-AUC**: 0.770
+
+**Confusion Matrix** (test set):
+
+```
+                     Predicted Normal   Predicted Suspicious
+Actual Normal              70,843              4,752
+Actual Suspicious           6,848              2,034
+```
+
+**Interpretation**: The model correctly clears 70,843 normal claims (94%
+specificity) and catches 2,034 suspicious claims it would otherwise miss.
+The relatively low precision on the Suspicious class (0.30) reflects the
+imprecision of the proxy label — not every claim settled below invoice was
+fraudulent; some were legitimately partially approved. The ROC-AUC of 0.770
+indicates meaningful discrimination power well above chance.
+
+> The rules engine supplements the ML model. A claim that fires two or more
+> rules reaches HIGH risk even when the ML score is near neutral, ensuring
+> explainable high-confidence flagging works without model artefacts.
+
+---
+
+## Running Tests
+
+```bash
+docker compose -f compose.yml -f compose.fraud-detect.yml exec backend \
+  python manage.py test fraud_detect --keepdb --verbosity=2
+```
+
+**36 tests** across three test classes:
+
+| Test class | Count | What it verifies |
+|---|---|---|
+| `MLScoringTestCase` | 7 | `score_claim_ml()` handles missing artefacts and exceptions without crashing |
+| `RiskLevelTestCase` | 9 | `compute_risk_level()` returns HIGH / MEDIUM / LOW for all combinations, including 2+ rules → HIGH |
+| `RulesEngineTestCase` | 20 | All 5 rules fire at correct thresholds; boundary conditions; missing data handled gracefully |
+
+Two expected warnings appear in the output:
+- A traceback inside `test_returns_neutral_result_on_model_exception` — **intentional**, confirms error handling works.
+- `Your models in app(s): 'claim', 'core', 'payroll' have changes not reflected in a migration` — an upstream openIMIS issue, unrelated to this module.
+
+> **Test database setup**: The openIMIS test runner cannot build `test_imis`
+> from scratch due to a known upstream deferred-SQL issue. Clone the live DB
+> once before the first test run:
+> ```bash
+> docker compose exec db psql -U IMISuser -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'IMIS' AND pid <> pg_backend_pid();"
+> docker compose exec db psql -U IMISuser -d postgres -c "DROP DATABASE IF EXISTS test_imis;"
+> docker compose exec db psql -U IMISuser -d postgres -c 'CREATE DATABASE test_imis TEMPLATE "IMIS";'
+> ```
+> Then always run tests with `--keepdb`.
+
+---
+
+## Responsible AI
+
+- **Training data**: Anonymised claims from a Kenyan medical insurer (422,382
+  rows). Member names and IDs were hashed (SHA-256 truncated to 12 chars) before
+  model training. Raw PII was never committed to the repository.
+- **Bias**: The model was trained on one insurer's data and may not generalise
+  to other provider networks or country contexts without retraining on local data.
+- **Intended use**: Flagging claims for **human review only**. The system must
+  not be used to automatically reject claims without a reviewer seeing the flag.
+- **Explainability**: The rules engine always produces a human-readable reason
+  for each flag. The ML anomaly score is shown alongside the fired rules to help
+  reviewers understand why a claim was flagged.
+- **Known failure modes**: Novel fraud patterns not present in training data
+  will not be detected until the model is retrained with new data.
+- **Feedback loop**: Reviewer overrides are logged in `tbl_ReviewerOverride`
+  and surfaced during the next `retrain_fraud_model` run, allowing the model to
+  learn from human corrections over time.
+
+---
+
+## Known Limitations
+
+- ICD vague-code detection uses a fixed list (`VAGUE_ICD_CODES` in `engine.py`
+  and `rules.py`). Codes not on the list are treated as specific. The list
+  should be expanded as local clinicians identify additional catch-all codes.
+- The `provider_avg_inflation`, `provider_claim_count`, `member_claim_count`,
+  and `amount_vs_benchmark` features default to neutral values (1.0 / 1) when
+  not supplied at inference time. Real-time aggregate precomputation is a future
+  enhancement.
+- The Isolation Forest model is retrained manually. A scheduled Celery task
+  for automatic periodic retraining is a planned improvement.
+- The `proxy_fraud_label` used for evaluation (settled < 80% of invoice) is an
+  imperfect proxy — some partial settlements are legitimate. True fraud labels
+  would improve model calibration.
+
+---
+
+## Project Status
+
+| Phase | Status |
+|-------|--------|
+| 0 — Environment Setup | ✅ Complete |
+| 1 — Data Exploration | ✅ Complete |
+| 2 — Feature Engineering | ✅ Complete (7 features) |
+| 3 — Model Training | ✅ Complete (422k rows, ROC-AUC 0.770) |
+| 4 — Django Module | ✅ Complete (models, signals, REST, GraphQL, migrations) |
+| 5 — FHIR Extensions | ✅ Complete (`fhir_extensions.py`) |
+| 6 — Feedback Loop | ✅ Complete (`retrain_fraud_model` management command) |
+| 7 — Unit Tests | ✅ Complete (36 tests passing) |
+| 8 — Frontend Badge | 🔲 In progress |
+| 9 — Performance Report | ✅ Complete (see table above) |
+| 10 — Documentation | 🔲 In progress |
+| 11 — Demo Preparation | 🔲 In progress |
+
+---
+
+## Draft PR
+
+> Link to be added once the draft PR is opened on `openimis/openimis-be_py`.
