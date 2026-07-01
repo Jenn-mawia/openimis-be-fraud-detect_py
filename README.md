@@ -189,40 +189,384 @@ All endpoints are mounted at `/api/fraud_detect/` by openIMIS's URL router
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/fraud_detect/flags/` | List all fraud flags. Filter: `?risk_level=HIGH\|MEDIUM\|LOW` |
+| GET | `/api/fraud_detect/flags/` | List all fraud flags. Supports filtering and pagination. |
 | GET | `/api/fraud_detect/flags/{claim_id}/` | Get the flag for a specific claim |
 | POST | `/api/fraud_detect/override/` | Submit a reviewer override decision |
 | POST | `/api/fraud_detect/score/` | Score a raw claim dict on demand (no DB write) |
 
-### Example: on-demand score
+> **Shell tip**: Write curl commands as a single line. A bare backslash-newline
+> continuation in zsh can silently split the command, causing `command not found: -H`.
+
+---
+
+### GET `/api/fraud_detect/flags/`
+
+List all fraud flags, newest first. Supports `risk_level`, `limit`, and `offset`
+query parameters.
+
+**Query parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `risk_level` | `HIGH` \| `MEDIUM` \| `LOW` | — | Filter by risk level |
+| `limit` | integer 1–1000 | 100 | Number of results per page |
+| `offset` | integer ≥ 0 | 0 | Number of results to skip |
+
+#### Example: all flags (first page)
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/" | python3 -m json.tool
+```
+
+```json
+{
+  "count": 1482,
+  "limit": 100,
+  "offset": 0,
+  "results": [
+    {
+      "id": 42,
+      "claim_id": 1017,
+      "is_rule_flagged": true,
+      "rule_flag_reasons": "[\"Invoice inflation above 3x\", \"Vague ICD code used\"]",
+      "anomaly_score": -0.305,
+      "is_ml_anomaly": true,
+      "overall_risk_level": "HIGH",
+      "created_at": "2026-07-01T11:22:04.123456Z",
+      "updated_at": "2026-07-01T11:22:04.123456Z"
+    }
+  ]
+}
+```
+
+#### Example: filter HIGH-risk flags, page 2
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/?risk_level=HIGH&limit=50&offset=50" | python3 -m json.tool
+```
+
+```json
+{
+  "count": 203,
+  "limit": 50,
+  "offset": 50,
+  "results": [ ... ]
+}
+```
+
+#### Example: invalid risk_level → 400
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/?risk_level=UNKNOWN" | python3 -m json.tool
+```
+
+```json
+{
+  "detail": "risk_level must be HIGH, MEDIUM, or LOW."
+}
+```
+
+#### Example: non-integer limit → 400
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/?limit=all" | python3 -m json.tool
+```
+
+```json
+{
+  "detail": "limit and offset must be integers."
+}
+```
+
+---
+
+### GET `/api/fraud_detect/flags/{claim_id}/`
+
+Returns the current fraud assessment for a single claim by its integer ID.
+
+#### Example: claim that has been scored
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/1017/" | python3 -m json.tool
+```
+
+```json
+{
+  "id": 42,
+  "claim_id": 1017,
+  "is_rule_flagged": true,
+  "rule_flag_reasons": "[\"Invoice inflation above 3x\", \"Vague ICD code used\"]",
+  "anomaly_score": -0.305,
+  "is_ml_anomaly": true,
+  "overall_risk_level": "HIGH",
+  "created_at": "2026-07-01T11:22:04.123456Z",
+  "updated_at": "2026-07-01T11:22:04.123456Z"
+}
+```
+
+#### Example: LOW-risk claim (no rules fired, ML near-neutral)
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/1001/" | python3 -m json.tool
+```
+
+```json
+{
+  "id": 10,
+  "claim_id": 1001,
+  "is_rule_flagged": false,
+  "rule_flag_reasons": "[]",
+  "anomaly_score": 0.142,
+  "is_ml_anomaly": false,
+  "overall_risk_level": "LOW",
+  "created_at": "2026-07-01T09:00:01.000000Z",
+  "updated_at": "2026-07-01T09:00:01.000000Z"
+}
+```
+
+#### Example: claim that has never been scored → 404
+
+```bash
+curl -s "http://localhost/api/fraud_detect/flags/99999/" | python3 -m json.tool
+```
+
+```json
+{
+  "detail": "No FraudFlag matches the given query."
+}
+```
+
+---
+
+### POST `/api/fraud_detect/override/`
+
+Records a reviewer's manual decision on a previously scored claim. The claim
+must already have a `FraudFlag` row (i.e. it must have been scored at least once).
+
+**Request body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `claim_id` | integer | ✅ | ID of the claim being reviewed |
+| `reviewer_decision` | `APPROVE` \| `REJECT` \| `ESCALATE` | ✅ | Reviewer's verdict |
+| `reviewer_id` | integer | ✅ | ID of the reviewer submitting the decision |
+| `notes` | string | — | Free-text justification (optional) |
+
+**Response (201)**: The created override record, including `original_risk_level`
+captured from the flag at submission time.
+
+#### Example: approve a LOW-risk claim
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/override/ -H "Content-Type: application/json" -d '{"claim_id": 1001, "reviewer_decision": "APPROVE", "reviewer_id": 7, "notes": "Verified with hospital records. Legitimate."}' | python3 -m json.tool
+```
+
+```json
+{
+  "id": 88,
+  "claim_id": 1001,
+  "original_risk_level": "LOW",
+  "reviewer_decision": "APPROVE",
+  "reviewer_id": 7,
+  "notes": "Verified with hospital records. Legitimate.",
+  "created_at": "2026-07-01T14:05:11.000000Z"
+}
+```
+
+#### Example: reject a HIGH-risk claim
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/override/ -H "Content-Type: application/json" -d '{"claim_id": 1017, "reviewer_decision": "REJECT", "reviewer_id": 3, "notes": "Invoice inflated 33x. Provider flagged for audit."}' | python3 -m json.tool
+```
+
+```json
+{
+  "id": 89,
+  "claim_id": 1017,
+  "original_risk_level": "HIGH",
+  "reviewer_decision": "REJECT",
+  "reviewer_id": 3,
+  "notes": "Invoice inflated 33x. Provider flagged for audit.",
+  "created_at": "2026-07-01T14:07:44.000000Z"
+}
+```
+
+#### Example: escalate for senior review
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/override/ -H "Content-Type: application/json" -d '{"claim_id": 1022, "reviewer_decision": "ESCALATE", "reviewer_id": 5}' | python3 -m json.tool
+```
+
+```json
+{
+  "id": 90,
+  "claim_id": 1022,
+  "original_risk_level": "MEDIUM",
+  "reviewer_decision": "ESCALATE",
+  "reviewer_id": 5,
+  "notes": "",
+  "created_at": "2026-07-01T14:10:02.000000Z"
+}
+```
+
+#### Example: invalid decision value → 400
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/override/ -H "Content-Type: application/json" -d '{"claim_id": 1017, "reviewer_decision": "IGNORE", "reviewer_id": 3}' | python3 -m json.tool
+```
+
+```json
+{
+  "reviewer_decision": [
+    "reviewer_decision must be one of: APPROVE, ESCALATE, REJECT"
+  ]
+}
+```
+
+#### Example: claim has no FraudFlag yet → 404
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/override/ -H "Content-Type: application/json" -d '{"claim_id": 99999, "reviewer_decision": "APPROVE", "reviewer_id": 3}' | python3 -m json.tool
+```
+
+```json
+{
+  "detail": "No FraudFlag matches the given query."
+}
+```
+
+---
+
+### POST `/api/fraud_detect/score/`
+
+Scores a claim dict on demand. No database read or write — useful for previewing
+a score before submitting a claim or for integration testing.
+
+**Request body** — all fields are optional; missing values fall back to safe
+neutral defaults.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `claimed_amount` | number | Total billed amount |
+| `approved_amount` | number | Amount the insurer settled |
+| `icd_code` | string | Diagnosis code (e.g. `Z51.9`) |
+| `date_from` | ISO date string | Service/admission date (`YYYY-MM-DD`) |
+| `date_claimed` | ISO date string | Date claim was submitted (`YYYY-MM-DD`) |
+| `provider_avg_inflation` | number | Pre-computed provider inflation ratio |
+| `provider_claim_count` | integer | Total claims from this provider |
+| `member_claim_count` | integer | Total claims for this member |
+| `amount_vs_benchmark` | number | Invoice ÷ median for this benefit code |
+
+**Response fields**
+
+| Field | Description |
+|-------|-------------|
+| `rules.is_flagged` | `true` if any rule fired |
+| `rules.fired_rules` | List of `{name, description}` objects |
+| `ml.anomaly_score` | Raw decision function value (more negative = more anomalous) |
+| `ml.is_anomaly` | `true` if model predicts anomaly |
+| `overall_risk_level` | `HIGH`, `MEDIUM`, or `LOW` |
+
+#### Example: HIGH-risk claim (multiple rules + ML anomaly)
 
 ```bash
 curl -s -X POST http://localhost/api/fraud_detect/score/ -H "Content-Type: application/json" -d '{"claimed_amount": 50000, "approved_amount": 1500, "icd_code": "Z51.9", "date_from": "2025-09-01", "date_claimed": "2026-07-01", "provider_avg_inflation": 3.5, "provider_claim_count": 80, "member_claim_count": 1, "amount_vs_benchmark": 8.0}' | python3 -m json.tool
 ```
 
-Response:
 ```json
 {
   "rules": {
     "is_flagged": true,
     "fired_rules": [
-      {"name": "Invoice inflation above 3x", "description": "..."},
-      {"name": "Vague ICD code used", "description": "..."},
-      {"name": "High-value claim with vague diagnosis", "description": "..."}
+      {
+        "name": "Invoice inflation above 3x",
+        "description": "Claimed amount is 33.3x the approved amount (threshold: 3x)"
+      },
+      {
+        "name": "Vague ICD code used",
+        "description": "ICD code Z51.9 is a known non-specific catch-all diagnosis"
+      },
+      {
+        "name": "High-value claim with vague diagnosis",
+        "description": "Claimed amount 50000 exceeds 10000 threshold with a vague ICD code"
+      },
+      {
+        "name": "Claim submitted long after service",
+        "description": "Claim submitted 303 days after service date (threshold: 90 days)"
+      }
     ]
   },
-  "ml": { "anomaly_score": -0.305, "is_anomaly": true },
+  "ml": {
+    "anomaly_score": -0.305,
+    "is_anomaly": true
+  },
   "overall_risk_level": "HIGH"
 }
 ```
 
-> **Shell tip**: Write curl commands as a single line. A bare backslash-newline
-> continuation in zsh can silently split the command, causing `command not found: -H`.
-
-### Example: list HIGH-risk flags
+#### Example: MEDIUM-risk claim (one rule, ML neutral)
 
 ```bash
-curl -s "http://localhost/api/fraud_detect/flags/?risk_level=HIGH" | python3 -m json.tool
+curl -s -X POST http://localhost/api/fraud_detect/score/ -H "Content-Type: application/json" -d '{"claimed_amount": 8000, "approved_amount": 2000, "icd_code": "A09.0", "date_from": "2026-06-01", "date_claimed": "2026-07-01", "provider_avg_inflation": 1.2, "provider_claim_count": 15, "member_claim_count": 2, "amount_vs_benchmark": 1.1}' | python3 -m json.tool
+```
+
+```json
+{
+  "rules": {
+    "is_flagged": true,
+    "fired_rules": [
+      {
+        "name": "Invoice inflation above 3x",
+        "description": "Claimed amount is 4.0x the approved amount (threshold: 3x)"
+      }
+    ]
+  },
+  "ml": {
+    "anomaly_score": 0.042,
+    "is_anomaly": false
+  },
+  "overall_risk_level": "MEDIUM"
+}
+```
+
+#### Example: LOW-risk claim (no rules, ML normal)
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/score/ -H "Content-Type: application/json" -d '{"claimed_amount": 3500, "approved_amount": 3200, "icd_code": "J18.9", "date_from": "2026-06-25", "date_claimed": "2026-06-28", "provider_avg_inflation": 1.1, "provider_claim_count": 12, "member_claim_count": 1, "amount_vs_benchmark": 0.9}' | python3 -m json.tool
+```
+
+```json
+{
+  "rules": {
+    "is_flagged": false,
+    "fired_rules": []
+  },
+  "ml": {
+    "anomaly_score": 0.187,
+    "is_anomaly": false
+  },
+  "overall_risk_level": "LOW"
+}
+```
+
+#### Example: minimal request (no fields supplied — all defaults)
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/score/ -H "Content-Type: application/json" -d '{}' | python3 -m json.tool
+```
+
+```json
+{
+  "rules": {
+    "is_flagged": false,
+    "fired_rules": []
+  },
+  "ml": {
+    "anomaly_score": 0.0,
+    "is_anomaly": false
+  },
+  "overall_risk_level": "LOW"
+}
 ```
 
 ---
