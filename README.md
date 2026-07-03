@@ -859,18 +859,18 @@ Two expected warnings appear in the output:
 
 | Phase | Status |
 |-------|--------|
-| 0 — Environment Setup | ✅ Complete |
-| 1 — Data Exploration | ✅ Complete |
-| 2 — Feature Engineering | ✅ Complete (7 features) |
-| 3 — Model Training | ✅ Complete (422k rows, ROC-AUC 0.770) |
-| 4 — Django Module | ✅ Complete (models, signals, REST, GraphQL, migrations) |
-| 5 — FHIR Extensions | ✅ Complete (`fhir_extensions.py`) |
-| 6 — Feedback Loop | ✅ Complete (`retrain_fraud_model` management command) |
-| 7 — Unit Tests | ✅ Complete (36 tests passing) |
-| 8 — Frontend Badge | 🔲 In progress |
-| 9 — Performance Report | ✅ Complete (see table above) |
-| 10 — Documentation | 🔲 In progress |
-| 11 — Demo Preparation | 🔲 In progress |
+| 0 — Environment Setup | Complete |
+| 1 — Data Exploration | Complete |
+| 2 — Feature Engineering | Complete (7 features) |
+| 3 — Model Training | Complete (422k rows, ROC-AUC 0.770) |
+| 4 — Django Module | Complete (models, signals, REST, GraphQL, migrations) |
+| 5 — FHIR Extensions | Complete (`fhir_extensions.py`) |
+| 6 — Feedback Loop | Complete (`retrain_fraud_model` management command) |
+| 7 — Unit Tests | Complete (36 tests passing) |
+| 8 — Frontend Badge | In progress |
+| 9 — Performance Report | Complete (see table above) |
+| 10 — Documentation | In progress |
+| 11 — Demo Preparation | In progress |
 
 ---
 
