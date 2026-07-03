@@ -764,37 +764,12 @@ query {
 
 ## Model Performance Report
 
-Evaluated on a held-out test set of **84,477 claims** (20% stratified split,
-`random_state=42`). The proxy fraud label is `1` when
-`SETTLED AMOUNT < 80% of INVOICE AMOUNT` — claims where the insurer already
-detected something wrong and partially rejected the claim.
+The full performance report for the currently active model — classification
+metrics, confusion matrix, ROC-AUC, and interpretation — lives alongside the
+model artefacts in [models/README.md](models/README.md).
 
-| Class | Precision | Recall | F1-score | Support |
-|-------|-----------|--------|----------|---------|
-| Normal | 0.91 | 0.94 | 0.92 | 75,595 |
-| Suspicious | 0.30 | 0.23 | 0.26 | 8,882 |
-| **Weighted avg** | **0.85** | **0.86** | **0.85** | **84,477** |
-
-**Overall accuracy**: 86% &nbsp;|&nbsp; **ROC-AUC**: 0.770
-
-**Confusion Matrix** (test set):
-
-```
-                     Predicted Normal   Predicted Suspicious
-Actual Normal              70,843              4,752
-Actual Suspicious           6,848              2,034
-```
-
-**Interpretation**: The model correctly clears 70,843 normal claims (94%
-specificity) and catches 2,034 suspicious claims it would otherwise miss.
-The relatively low precision on the Suspicious class (0.30) reflects the
-imprecision of the proxy label — not every claim settled below invoice was
-fraudulent; some were legitimately partially approved. The ROC-AUC of 0.770
-indicates meaningful discrimination power well above chance.
-
-> The rules engine supplements the ML model. A claim that fires two or more
-> rules reaches HIGH risk even when the ML score is near neutral, ensuring
-> explainable high-confidence flagging works without model artefacts.
+**At a glance** (8-feature model, 84,477-claim test set): accuracy **87.9%**,
+**ROC-AUC 0.847**. See [models/README.md](models/README.md) for the full breakdown.
 
 ---
 
@@ -873,13 +848,13 @@ Two expected warnings appear in the output:
 | 0 — Environment Setup | Complete |
 | 1 — Data Exploration | Complete |
 | 2 — Feature Engineering | Complete (8 features) |
-| 3 — Model Training | Complete (422k rows, ROC-AUC 0.770) |
+| 3 — Model Training | Complete (422k rows, ROC-AUC 0.847) |
 | 4 — Django Module | Complete (models, signals, REST, GraphQL, migrations) |
 | 5 — FHIR Extensions | Complete (`fhir_extensions.py`) |
 | 6 — Feedback Loop | Complete (`retrain_fraud_model` management command) |
 | 7 — Unit Tests | Complete (36 tests passing) |
 | 8 — Frontend Badge | In progress |
-| 9 — Performance Report | Complete (see table above) |
+| 9 — Performance Report | Complete (see [models/README.md](models/README.md)) |
 | 10 — Documentation | In progress |
 | 11 — Demo Preparation | In progress |
 
