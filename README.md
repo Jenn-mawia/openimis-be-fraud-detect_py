@@ -101,6 +101,17 @@ Claim saved (Django post_save signal)
 | `provider_claim_count` | Total claims submitted by this provider | Volume anomaly |
 | `member_claim_count` | Total claims for this member | Ghost beneficiary signal |
 | `amount_vs_benchmark` | Invoice ÷ median invoice for this benefit code | Benchmark deviation |
+| `had_pre_audit_adjustment` | 1 if the settled amount was reduced below the invoiced amount before audit | Original submission was not right (weak signal) |
+
+> **On `had_pre_audit_adjustment`**: the fact that an adjustment was needed at all
+> is itself a weak fraud signal — it means the original submission was off in some
+> way, and that "offness" tends to correlate with the stronger signals fraud
+> detectors care about (over-billing, vague codes, etc.). It is derived as
+> `invoice_inflation_ratio > 1.0` and correlates ~0.58 with the proxy fraud label.
+>
+> Note this is measured against a **proxy** fraud rate, not a true one: we use
+> "settled < 80% of invoice" as a stand-in for "the insurer detected something
+> off", because no labelled fraud data exists.
 
 ---
 
@@ -162,7 +173,7 @@ This creates three tables:
 
 ### 4. Train the ML model
 
-Place the feature CSV at `data/claims_features.csv` (must contain the 7 feature
+Place the feature CSV at `data/claims_features.csv` (must contain the 8 feature
 columns listed above, plus an optional `proxy_fraud_label` column which is
 ignored at inference time):
 
@@ -861,7 +872,7 @@ Two expected warnings appear in the output:
 |-------|--------|
 | 0 — Environment Setup | Complete |
 | 1 — Data Exploration | Complete |
-| 2 — Feature Engineering | Complete (7 features) |
+| 2 — Feature Engineering | Complete (8 features) |
 | 3 — Model Training | Complete (422k rows, ROC-AUC 0.770) |
 | 4 — Django Module | Complete (models, signals, REST, GraphQL, migrations) |
 | 5 — FHIR Extensions | Complete (`fhir_extensions.py`) |

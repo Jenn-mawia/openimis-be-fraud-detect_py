@@ -76,6 +76,19 @@ class Command(BaseCommand):
         self.stdout.write(f"Loading base feature data from {base_data_path} …")
         df = pd.read_csv(base_data_path)
 
+        # Derive had_pre_audit_adjustment on the fly if a freshly generated
+        # feature CSV does not yet include it.  An adjustment was made before
+        # audit whenever the settled amount was reduced below the invoiced
+        # amount (invoice_inflation_ratio > 1.0).
+        if (
+            "had_pre_audit_adjustment" not in df.columns
+            and "invoice_inflation_ratio" in df.columns
+        ):
+            df["had_pre_audit_adjustment"] = (
+                df["invoice_inflation_ratio"] > 1.0
+            ).astype(int)
+            self.stdout.write("Derived had_pre_audit_adjustment from invoice_inflation_ratio.")
+
         feature_columns = [
             "invoice_inflation_ratio",
             "claim_lag_days",
@@ -84,6 +97,7 @@ class Command(BaseCommand):
             "provider_claim_count",
             "member_claim_count",
             "amount_vs_benchmark",
+            "had_pre_audit_adjustment",
         ]
 
         missing = [c for c in feature_columns if c not in df.columns]

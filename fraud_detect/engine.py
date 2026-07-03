@@ -32,6 +32,7 @@ FEATURE_ORDER = [
     "provider_claim_count",
     "member_claim_count",
     "amount_vs_benchmark",
+    "had_pre_audit_adjustment",
 ]
 
 # ICD codes considered vague — kept in sync with rules.py
@@ -82,7 +83,7 @@ def _load_models():
 
 def _extract_features(claim_dict):
     """
-    Converts a claim dict into the 7-element numpy feature vector expected by
+    Converts a claim dict into the 8-element numpy feature vector expected by
     the trained model.  Uses the same transformations applied in Phase 2.
     """
     claimed = float(claim_dict.get("claimed_amount") or 0)
@@ -115,6 +116,12 @@ def _extract_features(claim_dict):
     member_claim_count = int(claim_dict.get("member_claim_count") or 1)
     amount_vs_benchmark = float(claim_dict.get("amount_vs_benchmark") or 1.0)
 
+    # An adjustment was made before audit whenever the settled amount was reduced
+    # below the invoiced amount (inflation_ratio > 1.0).  The fact that any
+    # adjustment was needed is itself a weak fraud signal — the original
+    # submission was not right.
+    had_pre_audit_adjustment = 1 if inflation_ratio > 1.0 else 0
+
     return np.array([[
         inflation_ratio,
         lag_days,
@@ -123,6 +130,7 @@ def _extract_features(claim_dict):
         provider_claim_count,
         member_claim_count,
         amount_vs_benchmark,
+        had_pre_audit_adjustment,
     ]], dtype=float)
 
 
