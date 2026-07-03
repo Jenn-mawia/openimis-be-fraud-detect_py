@@ -104,6 +104,28 @@ Claim saved (Django post_save signal)
 
 ---
 
+## Rules Engine Checks
+
+Layer 1 runs every claim through a set of deterministic, auditable rules
+(`rules.py`). Each rule that fires attaches a plain-language reason to the claim.
+Thresholds are tunable via constants at the top of `rules.py`.
+
+| Rule | Fires when | Fraud Signal |
+|------|-----------|--------------|
+| Claim lag exceeds 90 days | Claim submitted more than 90 days after the service date | Backdating |
+| Invoice inflation above 3x | Invoiced amount is more than 3× the approved amount | Overbilling |
+| Vague ICD code used | Diagnosis is a known non-specific catch-all (e.g. `Z51.9`) | Diagnosis disguise |
+| Claim filed after audit date | Submission date is later than the audit date (logically impossible) | Record tampering |
+| High-value claim with vague diagnosis | Claimed amount exceeds 20,000 KES with a non-specific ICD code | Unjustified high-value claim |
+| Invalid calendar date on claim | Any date field holds an impossible calendar date — e.g. 29 Feb in a non-leap year, 31 April, or 31 June | Data-entry error or record tampering |
+
+> The **Invalid calendar date** rule inspects the raw string form of `date_from`,
+> `date_claimed`, and `audit_date`. Values already parsed into `datetime.date`
+> objects are always valid and are skipped; non-date-looking strings are ignored
+> to avoid false positives. Both `YYYY-MM-DD` and `DD-MM-YYYY` formats are checked.
+
+---
+
 ## Installation
 
 ### 1. Register the module

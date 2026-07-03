@@ -18,6 +18,9 @@ gracefully rather than raising errors):
 Administrators can tune thresholds by editing the constants at the top of this file.
 """
 
+import re
+from datetime import date
+
 # ---------------------------------------------------------------------------
 # Configurable thresholds — change these to tune rule sensitivity
 # ---------------------------------------------------------------------------
@@ -54,6 +57,46 @@ def _claim_lag_days(claim):
     if not service_date or not claim_date:
         return 0
     return (claim_date - service_date).days
+
+
+# Date-like fields to validate for calendar correctness.
+_DATE_FIELDS = ("date_from", "date_claimed", "audit_date")
+
+# Matches YYYY-MM-DD / YYYY/MM/DD and DD-MM-YYYY / DD/MM/YYYY strings.
+_ISO_DATE_RE = re.compile(r"^\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s*$")
+_DMY_DATE_RE = re.compile(r"^\s*(\d{1,2})[-/](\d{1,2})[-/](\d{4})\s*$")
+
+
+def _has_invalid_calendar_date(claim):
+    """
+    Returns True if any date-like field holds a string that *looks* like a date
+    but is not a valid calendar date (e.g. 2025-02-29 in a non-leap year, or
+    2025-04-31, 2025-06-31).
+
+    Only string values are inspected — a ``datetime.date`` object can never hold
+    an invalid date, so those are always considered valid.  Values that do not
+    look like a date at all are ignored to avoid false positives.
+    """
+    for field in _DATE_FIELDS:
+        value = claim.get(field)
+        if not isinstance(value, str):
+            continue
+
+        match = _ISO_DATE_RE.match(value)
+        if match:
+            year, month, day = (int(g) for g in match.groups())
+        else:
+            match = _DMY_DATE_RE.match(value)
+            if not match:
+                continue
+            day, month, year = (int(g) for g in match.groups())
+
+        try:
+            date(year, month, day)
+        except ValueError:
+            return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +151,15 @@ RULES = [
             (claim.get("claimed_amount") or 0) > HIGH_VALUE_THRESHOLD
             and claim.get("icd_code") in VAGUE_ICD_CODES
         ),
+    },
+    {
+        "name": "Invalid calendar date on claim",
+        "description": (
+            "One of the claim's dates is not a real calendar date (for example "
+            "29 February in a non-leap year, or 31 April / 31 June). Impossible "
+            "dates indicate data entry errors or deliberate record tampering."
+        ),
+        "check": _has_invalid_calendar_date,
     },
 ]
 
