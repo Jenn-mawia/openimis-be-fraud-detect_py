@@ -137,6 +137,68 @@ Thresholds are tunable via constants at the top of `rules.py`.
 
 ---
 
+## GraphQL
+
+The model choice flows directly from one hard constraint: **there are no real
+fraud labels.** `proxy_fraud_label` ("settled < 80% of invoice") is used only for
+*evaluation* — it is never fed to the model during training (`model.fit(X)` takes
+no `y`). Given that, plus rare/unknown-shaped fraud, ~422k rows of tabular data,
+8 numeric features, and the need to score inside a `post_save` signal, Isolation
+Forest is the natural fit.
+
+Its core idea: anomalies are **few and different**, so they are *easy to isolate* —
+a random tree separates an outlier from the rest in very few splits, and the
+average split-depth becomes the anomaly score.
+
+| Property | Why it matters here |
+|----------|---------------------|
+| Unsupervised | Works with zero labels — the whole reason it was chosen |
+| Fast training & O(log n) inference | Cheap enough to score inside a `post_save` signal |
+| Handles multi-feature interactions | Catches "weird combinations" a single rule wouldn't |
+| Few hyperparameters | Mainly `contamination` + `n_estimators`; easy to tune/retrain |
+
+### Alternatives considered (unsupervised — the "no labels" world)
+
+| Model | How it works | vs. Isolation Forest |
+|-------|--------------|----------------------|
+| **Local Outlier Factor (LOF)** | Flags points in low-density neighbourhoods vs. their neighbours | Good at *local* anomalies, but memory/compute-heavy (neighbour lookups) and awkward to score new points live. Poor fit for 422k rows scored on every save. |
+| **One-Class SVM** | Learns a boundary around "normal" data | Powerful but scales ~O(n²); very slow to train at this size and sensitive to kernel/params. |
+| **Elliptic Envelope** | Fits a Gaussian; flags points far from the centre | Assumes one roughly-Gaussian blob — claims data is skewed and multi-modal, so it underperforms. |
+| **Autoencoder (neural net)** | Reconstructs input; high reconstruction error = anomaly | Can beat IsoForest on rich data, but needs more engineering, tuning, and compute, and is far less explainable. Overkill for 8 tabular features. |
+| **DBSCAN / GMM** | Density/cluster membership; outliers fall outside | Not designed for scoring new points incrementally; harder to tune with little upside here. |
+
+**Takeaway:** Isolation Forest is the standard first choice for tabular anomaly
+detection because it best balances accuracy, speed, scalability, and simplicity.
+The alternatives either scale poorly (One-Class SVM, LOF), assume a data shape we
+don't have (Elliptic Envelope, GMM), or add heavy complexity (autoencoder) for
+uncertain gain.
+
+### If real labels become available (supervised — the upgrade path)
+
+If verified fraud labels accumulate (e.g. from reviewer overrides in
+`tbl_ReviewerOverride`, or an audited dataset), supervised models usually
+**outperform any anomaly detector**, because they learn the actual decision
+boundary rather than just "unusualness":
+
+| Model | Strengths | Trade-offs |
+|-------|-----------|------------|
+| **Gradient-boosted trees (XGBoost / LightGBM)** | Usually best-in-class on tabular fraud; handles imbalance; feature importances | Needs labels; care with class imbalance |
+| **Random Forest (supervised)** | Robust, explainable, strong baseline | Needs labels |
+| **Logistic Regression** | Simple, transparent, regulator-friendly | Lower ceiling; needs labels |
+
+> **Why not train supervised on the proxy label now?** A supervised model trained
+> on `proxy_fraud_label` would largely just learn to reproduce the proxy rule
+> (`settled < 80% of invoice`) — nearly circular. Using an *unsupervised* detector
+> is more honest: it finds anomalies **independent of** the proxy definition, and
+> we then measure how well those anomalies line up with it (ROC-AUC 0.847).
+
+The natural evolution is **unsupervised now → semi-supervised → supervised (or a
+hybrid that feeds the IsoForest score as a feature into a supervised model)** once
+enough labels exist. The feedback loop (reviewer overrides logged and surfaced at
+retraining) is already built to support that migration.
+
+---
+
 ## Installation
 
 ### 1. Register the module
