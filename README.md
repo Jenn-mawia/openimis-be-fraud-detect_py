@@ -230,6 +230,7 @@ All endpoints are mounted at `/api/fraud_detect/` by openIMIS's URL router
 | POST | `/api/fraud_detect/override/` | Submit a reviewer override decision |
 | POST | `/api/fraud_detect/score/` | Score a raw claim dict on demand (no DB write) |
 | POST | `/api/fraud_detect/rescore/{claim_id}/` | Score an existing claim from the DB and persist the result |
+| POST | `/api/fraud_detect/claims/` | Create a real claim via the claim module, auto-score it, and return the flag |
 
 > **Shell tip**: Write curl commands as a single line. A bare backslash-newline
 > continuation in zsh can silently split the command, causing `command not found: -H`.
@@ -750,7 +751,131 @@ HTTP status: `503 Service Unavailable`.
 
 ---
 
-## GraphQL
+### POST `/api/fraud_detect/claims/`
+
+Creates a **real openIMIS claim** through the claim module's ORM. Saving the claim
+fires the `post_save` signal, which automatically scores it and writes a
+`FraudFlag` row. The response returns **both** the new claim and its fraud
+assessment — so you can create-and-see-the-score in a single request.
+
+This is the endpoint to use for a live demo: submit a claim, get its risk level back instantly.
+
+**Request body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `claimed_amount` | number | ✅ | Total billed amount |
+| `approved_amount` | number | — | Amount settled (defaults to `claimed_amount`) |
+| `icd_code` | string | — | Diagnosis code (e.g. `Z51.9`); falls back to first available if absent |
+| `date_from` | ISO date | — | Service date `YYYY-MM-DD` (defaults to today) |
+| `date_claimed` | ISO date | — | Submission date `YYYY-MM-DD` (defaults to today) |
+| `code` | string | — | Claim code (auto-generated `FD-YYYYMMDD-N` if omitted) |
+| `insuree_id` | integer | — | Insuree FK (first active insuree if omitted) |
+| `health_facility_id` | integer | — | Health facility FK (first active HF if omitted) |
+
+**Response**
+- `201 Created` — claim created and scored; body contains `claim` + `fraud_flag`.
+- `400 Bad Request` — missing `claimed_amount`, bad dates, duplicate code, or
+  no resolvable insuree / health facility / diagnosis.
+- `503 Service Unavailable` — the `claim` openIMIS module is not installed.
+
+> **Requires the full openIMIS stack** (claim, insuree, location, medical apps
+> installed and migrated, with at least one active insuree, health facility, and
+> diagnosis). On fresh installs where a requested ICD code is missing, the claim
+> falls back to the first available diagnosis (same as `seed_demo_claims`).
+
+#### Example: create a suspicious claim → HIGH
+
+Inflated invoice (50,000 billed vs 1,500 approved) + 300-day lag.
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/claims/ -H "Content-Type: application/json" -d '{"claimed_amount": 50000, "approved_amount": 1500, "icd_code": "Z51.9", "date_from": "2025-09-01", "date_claimed": "2026-07-01"}' | python3 -m json.tool
+```
+
+```json
+{
+  "claim": {
+    "id": 34,
+    "code": "FD-20260704-29",
+    "claimed": 50000.0,
+    "approved": 1500.0,
+    "icd_code": "Z51.9",
+    "date_from": "2025-09-01",
+    "date_claimed": "2026-07-01"
+  },
+  "fraud_flag": {
+    "id": 10,
+    "claim_id": 34,
+    "is_rule_flagged": true,
+    "rule_flag_reasons": [
+      {"name": "Claim lag exceeds 90 days", "description": "The claim was filed more than 90 days after the service was delivered. This is a strong indicator of backdated or fabricated claims."},
+      {"name": "Invoice inflation above 3x", "description": "The invoiced amount is more than 3 times the amount that was approved for payment. This suggests deliberate overbilling."}
+    ],
+    "anomaly_score": -0.158,
+    "is_ml_anomaly": true,
+    "overall_risk_level": "HIGH",
+    "created_at": "2026-07-04T10:50:18.562318Z",
+    "updated_at": "2026-07-04T10:50:18.562336Z"
+  }
+}
+```
+
+HTTP status: `201 Created`.
+
+#### Example: create a clean claim → LOW
+
+Claimed equals approved, submitted the same week (all other fields default).
+
+```bash
+curl -s -X POST http://localhost/api/fraud_detect/claims/ -H "Content-Type: application/json" -d '{"claimed_amount": 3000, "approved_amount": 3000, "icd_code": "J06.9"}' | python3 -m json.tool
+```
+
+```json
+{
+  "claim": {
+    "id": 35,
+    "code": "FD-20260704-30",
+    "claimed": 3000.0,
+    "approved": 3000.0,
+    "icd_code": "J06.9",
+    "date_from": "2026-07-04",
+    "date_claimed": "2026-07-04"
+  },
+  "fraud_flag": {
+    "id": 11,
+    "claim_id": 35,
+    "is_rule_flagged": false,
+    "rule_flag_reasons": [],
+    "anomaly_score": 0.121,
+    "is_ml_anomaly": false,
+    "overall_risk_level": "LOW",
+    "created_at": "2026-07-04T10:50:19.125686Z",
+    "updated_at": "2026-07-04T10:50:19.125701Z"
+  }
+}
+```
+
+HTTP status: `201 Created`.
+
+#### Example: missing claimed_amount → 400
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost/api/fraud_detect/claims/ -H "Content-Type: application/json" -d '{"icd_code": "J06.9"}'
+```
+
+```json
+{
+  "detail": "claimed_amount is required."
+}
+```
+
+HTTP status: `400 Bad Request`.
+
+> **Tip**: The returned `claim.id` can be passed straight to
+> `GET /api/fraud_detect/flags/{claim_id}/` or
+> `POST /api/fraud_detect/rescore/{claim_id}/` for follow-up calls.
+
+---
 
 ```graphql
 query {

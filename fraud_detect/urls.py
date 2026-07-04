@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     ClaimFraudFlagView,
+    CreateClaimView,
     FraudFlagListView,
     RescoreClaimView,
     ReviewerOverrideView,
@@ -15,6 +16,7 @@ from .views import (
 #   /api/fraud_detect/override/
 #   /api/fraud_detect/score/
 #   /api/fraud_detect/rescore/<claim_id>/
+#   /api/fraud_detect/claims/
 
 app_name = "fraud_detect"
 
@@ -37,4 +39,6 @@ urlpatterns = [
         RescoreClaimView.as_view(),
         name="fraud-rescore",
     ),
+    # Create a real claim via the claim module, auto-score it, return the flag
+    path("claims/", CreateClaimView.as_view(), name="fraud-create-claim"),
 ]
